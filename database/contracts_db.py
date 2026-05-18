@@ -26,7 +26,7 @@ def init_db():
 
     user_id INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     FOREIGN KEY (user_id) REFERENCES users(id)
 )""")
 
@@ -80,21 +80,21 @@ def get_all_contracts(user_id=None, role=None):
     Admins see all contracts, regular users see only their own.
     """
     conn = sqlite3.connect(DB_NAME)
-    
+
     if role == "Admin":
         # Admins see all contracts
         df = pd.read_sql_query("SELECT * FROM contracts", conn)
     elif user_id:
         # Regular users see only their contracts
         df = pd.read_sql_query(
-            "SELECT * FROM contracts WHERE user_id = ?", 
-            conn, 
+            "SELECT * FROM contracts WHERE user_id = ?",
+            conn,
             params=(user_id,)
         )
     else:
         # No user specified, return empty
         df = pd.DataFrame()
-    
+
     conn.close()
     return df
 
@@ -103,42 +103,105 @@ def get_contract_by_id(contract_id, user_id=None, role=None):
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     if role == "Admin":
         cursor.execute("SELECT * FROM contracts WHERE id = ?", (contract_id,))
     elif user_id:
         cursor.execute(
-            "SELECT * FROM contracts WHERE id = ? AND user_id = ?", 
+            "SELECT * FROM contracts WHERE id = ? AND user_id = ?",
             (contract_id, user_id)
         )
     else:
         conn.close()
         return None
-    
+
     row = cursor.fetchone()
     conn.close()
-    
+
     if row:
         return dict(row)
     return None
+
+def get_contract_by_hash(file_hash: str, user_id: int, role: str):
+    """Get a contract by its file hash."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        if role == "Admin":
+            cursor.execute(
+                "SELECT * FROM contracts WHERE file_hash = ?", (file_hash,)
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM contracts WHERE file_hash = ? AND user_id = ?",
+                (file_hash, user_id),
+            )
+        row = cursor.fetchone()
+        if row:
+            cols = [d[0] for d in cursor.description]
+            return dict(zip(cols, row))
+        return None
+    finally:
+        conn.close()
+
+
+def get_user_document_count(user_id: int) -> int:
+    """Return number of contracts belonging to a user."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM contracts WHERE user_id = ?", (user_id,)
+        )
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def search_contracts(query: str, user_id: int, role: str):
+    """Search contracts by filename or party name."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        like = f"%{query}%"
+        if role == "Admin":
+            cursor.execute(
+                """SELECT * FROM contracts
+                   WHERE file_name LIKE ?
+                   OR party_1_name LIKE ?
+                   OR party_2_name LIKE ?""",
+                (like, like, like),
+            )
+        else:
+            cursor.execute(
+                """SELECT * FROM contracts
+                   WHERE user_id = ?
+                   AND (file_name LIKE ? OR party_1_name LIKE ? OR party_2_name LIKE ?)""",
+                (user_id, like, like, like),
+            )
+        rows = cursor.fetchall()
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, r)) for r in rows]
+    finally:
+        conn.close()
 
 def delete_contract(contract_id, user_id=None, role=None):
     """Delete a contract with permission check."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
+
         if role == "Admin":
             cursor.execute("DELETE FROM contracts WHERE id = ?", (contract_id,))
         elif user_id:
             cursor.execute(
-                "DELETE FROM contracts WHERE id = ? AND user_id = ?", 
+                "DELETE FROM contracts WHERE id = ? AND user_id = ?",
                 (contract_id, user_id)
             )
         else:
             conn.close()
             return False
-        
+
         conn.commit()
         deleted = cursor.rowcount > 0
         conn.close()
