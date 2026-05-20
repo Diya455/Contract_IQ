@@ -1,0 +1,15 @@
+# Render.com deployment configuration
+services:
+  - type: web
+    name: contractiq
+    env: docker
+    plan: free
+    region: oregon  # Change to singapore if closer to you
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
