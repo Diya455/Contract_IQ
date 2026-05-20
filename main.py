@@ -1,4 +1,6 @@
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 import tempfile
 import hashlib
 import pandas as pd
@@ -7,8 +9,20 @@ from ingestion.ocr_loader import extract_text_from_pdf
 from ingestion.pdf_loader import chunk_text_clause_section_with_metadata, load_model, embed_chunks, generate_answer
 from extraction.structured_extractor import extract_structured_data
 from vectordb.weaviate_client import insert_document, create_schema, query_similar_chunks
-from database.contracts_db import init_db, insert_contract, get_all_contracts
+from database.contracts_db import (
+    init_db, insert_contract, get_all_contracts,
+    get_total_contract_value, get_contracts_by_status,
+    get_top_parties, get_contracts_by_month,
+    get_risk_distribution, get_service_type_distribution,
+    get_expiring_contracts
+)
 from database.users_db import init_users_table, create_default_admin, get_all_users, update_user_role, deactivate_user, activate_user
+from analytics.contract_analytics import (
+    extract_contract_value, calculate_risk_score,
+    calculate_renewal_probability, determine_contract_status,
+    analyze_contract_text, get_risk_category, get_risk_color,
+    format_currency, calculate_portfolio_health
+)
 from alerts.expiry_engine import check_expiry_alerts
 from auth.authenticator import (
     init_session_state,
@@ -272,18 +286,18 @@ with st.sidebar:
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
+
     st.markdown("<div style='margin: 10px 0;'></div>", unsafe_allow_html=True)
-    
+
     # Navigation
-    pages = ["📤 Upload Contracts", "📊 Dashboard", "💬 Chat with Contracts"]
+    pages = ["📤 Upload Contracts", "📊 Dashboard", "📈 Analytics Dashboard"]
     if is_admin():
         pages.append("👥 User Management")
-    
+
     page = st.radio("Navigation", pages, label_visibility="collapsed")
-    
+
     st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-    
+
     # Logout button
     if st.button("🚪 Logout", use_container_width=True):
         logout()
@@ -361,7 +375,7 @@ if page == "📤 Upload Contracts":
                     model = load_model()
                     pages_data = [{"page_number": 1, "text": raw_text}]
                     chunks = chunk_text_clause_section_with_metadata(pages_data)
-                    
+
                     for chunk in chunks:
                         chunk_text = chunk["content"]
                         embedding = embed_chunks([chunk_text], model)[0]
@@ -588,6 +602,273 @@ elif page == "📊 Dashboard":
         hide_index=True,
     )
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE: ANALYTICS DASHBOARD
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "📈 Analytics Dashboard":
+
+    st.markdown("""
+    <div style='padding: 8px 0 20px 0;'>
+        <div style='font-size: 1.6rem; font-weight: 700; color: #f0f2f6;'>
+            Analytics Dashboard
+        </div>
+        <div style='font-size: 0.88rem; color: #7b8299; margin-top: 3px;'>
+            Contract portfolio insights, trends, and risk analysis
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Get all contracts for analytics
+    df = get_all_contracts(user_id=st.session_state.user_id, role=st.session_state.role)
+
+    if df.empty:
+        st.markdown("""
+        <div style='text-align:center; padding:60px; background:#161820; border:1px solid #1e2130;
+                    border-radius:14px; color:#6b7280;'>
+            <div style='font-size:3rem; margin-bottom:12px;'>📊</div>
+            <div style='font-size:1.1rem; color:#9ba3b8; font-weight:600;'>No Data Available</div>
+            <div style='font-size:0.88rem; margin-top:8px;'>
+                Upload contracts to see analytics insights
+            </div>
+        </div>""", unsafe_allow_html=True)
+        st.stop()
+
+    # ═══════════════════════════════════════════════════════
+    # KEY METRICS
+    # ═══════════════════════════════════════════════════════
+
+    total_value = get_total_contract_value(st.session_state.user_id, st.session_state.role)
+    avg_risk = df['risk_score'].mean() if 'risk_score' in df.columns else 0
+    active_count = len(df[df['status'] == 'Active']) if 'status' in df.columns else 0
+    expiring_df = get_expiring_contracts(30, st.session_state.user_id, st.session_state.role)
+    expiring_count = len(expiring_df)
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown(f"""
+        <div class='metric-card blue'>
+            <div class='metric-label'>Total Portfolio Value</div>
+            <div class='metric-value'>{format_currency(total_value)}</div>
+            <div class='metric-sub'>{len(df)} contracts</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col2:
+        risk_color = "green" if avg_risk < 30 else ("amber" if avg_risk < 70 else "red")
+        st.markdown(f"""
+        <div class='metric-card {risk_color}'>
+            <div class='metric-label'>Average Risk Score</div>
+            <div class='metric-value'>{avg_risk:.0f}</div>
+            <div class='metric-sub'>{get_risk_category(avg_risk)}</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col3:
+        st.markdown(f"""
+        <div class='metric-card green'>
+            <div class='metric-label'>Active Contracts</div>
+            <div class='metric-value'>{active_count}</div>
+            <div class='metric-sub'>{(active_count/len(df)*100):.0f}% of portfolio</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col4:
+        exp_color = "gray" if expiring_count == 0 else "amber"
+        st.markdown(f"""
+        <div class='metric-card {exp_color}'>
+            <div class='metric-label'>Expiring Soon</div>
+            <div class='metric-value'>{expiring_count}</div>
+            <div class='metric-sub'>Within 30 days</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════
+    # TIME SERIES ANALYSIS
+    # ═══════════════════════════════════════════════════════
+
+    st.markdown("""
+    <div class='section-title'>
+        <span style='color: #9ba3b8;'>📈</span> Trend Analysis
+    </div>""", unsafe_allow_html=True)
+
+    monthly_df = get_contracts_by_month(st.session_state.user_id, st.session_state.role)
+
+    if not monthly_df.empty:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Contracts over time
+            fig1 = px.line(monthly_df, x='month', y='count',
+                          title='Contracts Uploaded Over Time',
+                          markers=True)
+            fig1.update_layout(
+                plot_bgcolor='#1e212c',
+                paper_bgcolor='#1e212c',
+                font_color='#f0f2f6',
+                xaxis_title='Month',
+                yaxis_title='Number of Contracts',
+                height=400
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with col2:
+            # Value over time
+            fig2 = px.area(monthly_df, x='month', y='total_value',
+                          title='Portfolio Value Over Time')
+            fig2.update_layout(
+                plot_bgcolor='#1e212c',
+                paper_bgcolor='#1e212c',
+                font_color='#f0f2f6',
+                xaxis_title='Month',
+                yaxis_title='Total Value (USD)',
+                height=400
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("📊 Upload contracts across multiple months to see trends")
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════
+    # DISTRIBUTION ANALYSIS
+    # ═══════════════════════════════════════════════════════
+
+    st.markdown("""
+    <div class='section-title'>
+        <span style='color: #9ba3b8;'>🎯</span> Portfolio Distribution
+    </div>""", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        # Risk distribution
+        risk_df = get_risk_distribution(st.session_state.user_id, st.session_state.role)
+        if not risk_df.empty:
+            fig3 = px.pie(risk_df, values='count', names='risk_category',
+                         title='Risk Distribution',
+                         color='risk_category',
+                         color_discrete_map={
+                             'Low': '#22c55e',
+                             'Medium': '#f59e0b',
+                             'High': '#ef4444'
+                         })
+            fig3.update_layout(
+                plot_bgcolor='#1e212c',
+                paper_bgcolor='#1e212c',
+                font_color='#f0f2f6',
+                height=350
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.info("No risk data available")
+
+    with col2:
+        # Service type distribution
+        service_df = get_service_type_distribution(st.session_state.user_id, st.session_state.role)
+        if not service_df.empty:
+            # Limit to top 5 for readability
+            service_df = service_df.head(5)
+            fig4 = px.bar(service_df, x='count', y='service_type',
+                         title='Top 5 Service Types',
+                         orientation='h',
+                         color='total_value',
+                         color_continuous_scale='Blues')
+            fig4.update_layout(
+                plot_bgcolor='#1e212c',
+                paper_bgcolor='#1e212c',
+                font_color='#f0f2f6',
+                xaxis_title='Count',
+                yaxis_title='Service Type',
+                height=350
+            )
+            st.plotly_chart(fig4, use_container_width=True)
+        else:
+            st.info("No service type data available")
+
+    with col3:
+        # Status distribution
+        status_df = get_contracts_by_status(st.session_state.user_id, st.session_state.role)
+        if not status_df.empty:
+            fig5 = px.pie(status_df, values='count', names='status',
+                         title='Status Distribution',
+                         hole=0.4)
+            fig5.update_layout(
+                plot_bgcolor='#1e212c',
+                paper_bgcolor='#1e212c',
+                font_color='#f0f2f6',
+                height=350
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+        else:
+            st.info("No status data available")
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════
+    # PARTY ANALYSIS
+    # ═══════════════════════════════════════════════════════
+
+    st.markdown("""
+    <div class='section-title'>
+        <span style='color: #9ba3b8;'>👥</span> Top Contracting Parties
+    </div>""", unsafe_allow_html=True)
+
+    parties_df = get_top_parties(st.session_state.user_id, st.session_state.role, limit=10)
+
+    if not parties_df.empty:
+        fig6 = px.bar(parties_df, x='count', y='party_name',
+                     title='Top 10 Parties by Contract Count',
+                     orientation='h',
+                     color='total_value',
+                     color_continuous_scale='Blues',
+                     labels={'count': 'Number of Contracts',
+                            'party_name': 'Party Name',
+                            'total_value': 'Total Value'})
+        fig6.update_layout(
+            plot_bgcolor='#1e212c',
+            paper_bgcolor='#1e212c',
+            font_color='#f0f2f6',
+            xaxis_title='Number of Contracts',
+            yaxis_title='',
+            height=400
+        )
+        st.plotly_chart(fig6, use_container_width=True)
+    else:
+        st.info("📊 No party data available yet")
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════════════════
+    # HIGH RISK CONTRACTS
+    # ═══════════════════════════════════════════════════════
+
+    st.markdown("""
+    <div class='section-title'>
+        <span style='color: #9ba3b8;'>⚠️</span> High Risk Contracts
+    </div>""", unsafe_allow_html=True)
+
+    if 'risk_score' in df.columns:
+        high_risk_df = df[df['risk_score'] > 70].sort_values('risk_score', ascending=False)
+
+        if not high_risk_df.empty:
+            # Show relevant columns
+            display_cols = []
+            if 'file_name' in high_risk_df.columns: display_cols.append('file_name')
+            if 'party_1_name' in high_risk_df.columns: display_cols.append('party_1_name')
+            if 'party_2_name' in high_risk_df.columns: display_cols.append('party_2_name')
+            if 'risk_score' in high_risk_df.columns: display_cols.append('risk_score')
+            if 'expiry_date' in high_risk_df.columns: display_cols.append('expiry_date')
+            if 'contract_value' in high_risk_df.columns: display_cols.append('contract_value')
+
+            st.dataframe(
+                high_risk_df[display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.success("✅ No high-risk contracts in your portfolio!")
+    else:
+        st.info("Risk scores not yet calculated. Re-upload contracts to enable risk analysis.")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PAGE: CHAT
@@ -688,11 +969,11 @@ elif page == "💬 Chat with Contracts":
 # PAGE: USER MANAGEMENT (ADMIN ONLY)
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "👥 User Management":
-    
+
     if not is_admin():
         st.error("🚫 Admin access required")
         st.stop()
-    
+
     st.markdown("""
     <div style='padding: 8px 0 20px 0;'>
         <div style='font-size: 1.6rem; font-weight: 700; color: #f0f2f6;'>
@@ -703,9 +984,9 @@ elif page == "👥 User Management":
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
+
     users = get_all_users()
-    
+
     if users:
         st.markdown(f"""
         <div class='metric-card blue' style='margin-bottom: 20px;'>
@@ -714,18 +995,18 @@ elif page == "👥 User Management":
             <div class='metric-sub'>Registered accounts</div>
         </div>
         """, unsafe_allow_html=True)
-        
+
         st.markdown("""
         <div class='section-title'>
             <span style='color: #9ba3b8;'>👤</span> User List
         </div>""", unsafe_allow_html=True)
-        
+
         for user in users:
             status_color = "#22c55e" if user['is_active'] else "#ef4444"
             status_text = "Active" if user['is_active'] else "Inactive"
-            
+
             col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-            
+
             with col1:
                 st.markdown(f"""
                 <div style='padding: 10px 0;'>
@@ -733,7 +1014,7 @@ elif page == "👥 User Management":
                     <div style='font-size: 0.8rem; color: #7b8299;'>{user['email']}</div>
                 </div>
                 """, unsafe_allow_html=True)
-            
+
             with col2:
                 role_badge = "badge-blue" if user['role'] == "Admin" else "badge-gray"
                 st.markdown(f"""
@@ -741,14 +1022,14 @@ elif page == "👥 User Management":
                     <span class='badge {role_badge}'>{user['role']}</span>
                 </div>
                 """, unsafe_allow_html=True)
-            
+
             with col3:
                 st.markdown(f"""
                 <div style='padding: 10px 0;'>
                     <span style='color: {status_color}; font-weight: 600;'>● {status_text}</span>
                 </div>
                 """, unsafe_allow_html=True)
-            
+
             with col4:
                 if user['id'] != st.session_state.user_id:  # Can't modify own account
                     if user['is_active']:
@@ -761,8 +1042,8 @@ elif page == "👥 User Management":
                             if activate_user(user['id']):
                                 st.success(f"User {user['username']} activated")
                                 st.rerun()
-            
+
             st.markdown("<div style='border-bottom: 1px solid #2d3140; margin: 10px 0;'></div>", unsafe_allow_html=True)
-    
+
     else:
         st.info("No users found")
